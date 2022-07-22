@@ -1,0 +1,433 @@
+---
+title: "Surface-Deep 2021 Project"
+author: "Melissa"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    highlight: haddock
+    keep_md: yes
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+      toc_depth: 3
+  pdf_document:
+    toc: yes
+---
+
+
+# PART I: Setup and Libraries
+
+```{r set_global_options, echo = FALSE}
+require(knitr)
+knitr::opts_chunk$set(eval = TRUE, 
+                      echo = FALSE, 
+                      cache = FALSE,
+                      include = TRUE,
+                      collapse = FALSE,
+                      message=FALSE,
+                      warning=FALSE,
+                      dependson = NULL,
+                      engine = "R", # Chunks will always have R code, unless noted
+                      error = TRUE,
+                      #Figure options
+                      dev = c("png", "pdf"),
+                      fig.path="outfiles_demo/",  
+                      fig.align = "center", 
+                      fig.width = 8,
+                      fig.height = 6
+                      )
+```
+
+Here we will install and load the required packages for our analysis. 
+
+```{r setup}
+
+# Install packages - can do this manually with Tools->Install Packages (from CRAN), or in code, eg, install.packages("knitr")
+
+library(knitr)
+library(ggplot2) 
+library(tidyr) 
+library(vegan) 
+library(data.table)
+library(DT)
+library(ggplot2)
+library(vegan)
+library(dplyr)
+library(scales)
+library(grid)
+library(reshape2)
+library(phyloseq)
+
+#install.packages("BiocManager")
+#BiocManager::install("phyloseq")
+
+library("phyloseq")
+
+# Root directory
+opts_knit$set(root.dir = "C:/Users/Cam/Downloads/Microbes in the Wild/SurfaceDeep-20220722T012221Z-001/SurfaceDeep/")
+
+```
+
+
+# PART II: Data import and create phyloseq object
+
+There are three files required to create our phyloseq object: 1. the taxonomy file from mothur, 2. the shared file (OTU file) that  connects the OTU counts per sample and 3. the sample metadata file that contains all the other important information describing each sample (group, sample date, sample location, etc.).
+
+
+```{r data_import_create_phylo}
+
+
+# Import OTU table
+OTUfile <- read.table("C:/Users/Cam/Downloads/Microbes in the Wild/SurfaceDeep-20220722T012221Z-001/SurfaceDeep/stability.trim.contigs.good.unique.good.filter.unique.precluster.pick.an.shared", header=TRUE, sep="\t")
+
+#reformat raw table
+OTUfile = subset(OTUfile, select = -c(label) )
+rownames(OTUfile) <- OTUfile[,1]
+OTUfile = subset(OTUfile, select = -c(Group,numOtus) )
+otumat<-as.matrix(OTUfile)
+
+#export reformated table (can directly import this for future running of this code)
+write.table(otumat, file = "C:/Users/Cam/Downloads/Microbes in the Wild/SurfaceDeep-20220722T012221Z-001/SurfaceDeep/OTU_matrix_reformat.tsv", append = FALSE, quote = FALSE, sep = "\t", eol = "\n", na = "NA", dec = ".", row.names = TRUE, col.names = TRUE, qmethod = c("escape", "double"), fileEncoding = "")
+
+# Import taxonomy file 
+TAXfile <- read.table("C:/Users/Cam/Downloads/Microbes in the Wild/SurfaceDeep-20220722T012221Z-001/SurfaceDeep/stability.trim.contigs.good.unique.good.filter.unique.precluster.pick.an.0.03.cons.taxonomy", header=TRUE, sep="\t", fill=TRUE)
+rownames(TAXfile) <- TAXfile$OTU
+TAXfile = subset(TAXfile, select = -c(OTU,Size) )
+TAXfile_sep<-separate(data = TAXfile, col = "Taxonomy", into = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep = ";")
+#head(TAXfile)
+
+# Change the taxonomy names
+taxmat<-as.matrix(TAXfile_sep)
+colnames(taxmat) <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+   #If you want to check on the imported taxonomy file
+#  head(taxmat)
+#  dim(taxmat)
+
+# Import sample metadata
+map <- read.table("C:/Users/Cam/Downloads/Microbes in the Wild/SurfaceDeep-20220722T012221Z-001/SurfaceDeep/MiW21_16S.meta.tsv", header=TRUE, sep="\t")
+rownames(map) <- map$Sample_ID
+map$Conc_class <- factor(map$Conc_class, levels=c("H-CON", "M-CON", "L-CON", "NO_PLASTIC", "LAKE_WATER_PA", "LAKE_WATER_FL"))
+mapdf<-as.data.frame(map)
+
+# set colors for concentration classes for plotting later
+conc_col  <- c(
+  "H-CON" = "#a20119",
+  "M-CON" = "#dd720a",
+  "L-CON" = "#e9c662",
+  "LAKE_WATER_FL" = "#263045",
+  "LAKE_WATER_PA" = "#3b99b2",
+  "NO_PLASTIC" = "#86b0a5")
+
+sd_col  <- c(
+  "SURF" = "#EBCC29",
+  "DEEP" = "#352749"
+)
+
+plast_col  <- c(
+  "FILM" = "#899CA4",
+  "YL" = "#FAD40E",
+  "LAKE_WATER_PA" = "#3b99b2",
+  "LAKE_WATER_FL" = "#263045",
+  "NO_PLASTIC" = "#CA3311",
+  "MIX" = "#9A8822"
+)
+
+samp_type_col <- c(
+  "jar plastic" = "#F2AD00",
+  "jar water" = "#AADDDE",
+  "manta non-plast" = "#09785E",
+  "manta plastic" = "#F98400",
+  "lake water" = "#036B9A"
+)
+  
+# Create the phyloseq object called "plast_phylo"
+OTU = otu_table(otumat, taxa_are_rows = FALSE)
+TAX = tax_table(taxmat)
+MAP<-sample_data(mapdf)
+
+plast_phylo = phyloseq(OTU, TAX, MAP)   #works 
+
+```
+
+# PART III: Cleaning up phyloseq object
+
+## Checking sequencing depth
+
+```{r sequencing_depth_hist}
+
+# Calculate the sequencing depth of each sample 
+sample_sum_df <- data.frame(sum = sample_sums(plast_phylo))
+
+#Report read count summary statistics 
+summary(sample_sum_df$sum)
+
+####  Create a plot of the number of sequences per sample
+ggplot(sample_sum_df, aes(x = sum)) + 
+  geom_histogram(color = "black", fill = "goldenrod", binwidth = 2000) +
+  ggtitle("Distribution of sample sequencing depth") + 
+  xlab("Read counts") +
+  theme(axis.title.y = element_blank())
+  
+```
+
+
+Based on this distribution, we can weed out the samples with only a few reads by pruning those with sequencing depth less than 1000. We can look at the read count table to see the sample ID of the one sample with few reads:
+
+```{r seq_count_table}
+
+datatable(sample_sum_df, 
+          options = list(pageLength = 10),
+          caption = "Sum of sequences per sample"
+          )
+# From sorting this table by decreasing sequence count, we can see that there were a few samples that had only a small number of reads. We will remove these (prune) from our data for analysis later on.
+
+```
+
+From sorting this table by increasing sequence count, we can see that some samples (DNA_99 and DNA_108) had only a few reads. We will remove these (prune) from our data for analysis later on.
+
+##  Prune out low read count samples and mitochondrial reads
+
+We can directly prune our phyloseq object to remove the sample with <1000 sequences. Then we create a new pruned phyloseq object. At the same time, we will remove reads that derive from mitochondrial 16S rRNA gene sequences.
+
+```{r prune_lt1000_mito}
+          
+plast_phylo_pruned <- prune_samples(sample_sums(plast_phylo) > 1000, plast_phylo)
+
+plast_phylo_chloro <- plast_phylo_pruned %>%
+  subset_taxa(
+    Order == "Chloroplast(100)"
+
+      )
+
+plast_phylo_pruned <- plast_phylo_pruned %>%
+  subset_taxa(
+    Family  != "Mitochondria(100)" &
+    Domain != "Eukaryota_unclassified(100)" &
+    Order != "Chloroplast(100)"
+
+      )
+
+
+
+```
+Pruning to remove samples <1000 sequences removed 1 sample.
+
+This is our starting phyloseq object (plast_phylo_pruned).
+
+# Unconstrained Ordinations
+One of the best exploratory analyses for amplicon data is unconstrained ordinations. Here we will look at ordinations of the full AvBot community samples, then subset them to explore variation within the experimental data.
+
+To read more about Principle Component Analyses (PCoA), see this great resource for ecological statistics, [GUSTAME PCoA](https://mb3is.megx.net/gustame/dissimilarity-based-methods/principal-coordinates-analysis).
+
+```{r pcoa_all_data}
+
+# Ordinate
+plast_phylo.ord <- ordinate(
+  physeq = plast_phylo_pruned, 
+  method = "PCoA", 
+  distance = "bray"
+)
+
+# Plot 
+plot_ordination(
+  physeq = plast_phylo_pruned,
+  ordination = plast_phylo.ord,
+  color = "Sample_Type",
+  shape = "Depth_class",
+  title = "PCoA of Plastic Project Communities from MiW 2021"
+) + 
+  scale_color_manual(values = samp_type_col) +
+  geom_point(aes(color = Sample_Type), alpha = 0.7, size = 3) +
+  geom_point(colour = "grey90", size = 1.5) 
+
+```
+
+# Create phyloseq objects for different projects
+```{r surface_deep_phyloseq}
+
+sd_phylo <- plast_phylo_pruned %>%
+  subset_samples(
+    Conc_class %in% c("H-CON", "NO_PLASTIC", "LAKE_WATER_PA", "LAKE_WATER_FL") &
+    Div_class %in% c("L-DIV", "NO_PLASTIC", "LAKE_WATER_PA", "LAKE_WATER_FL") &
+    Depth_class %in% c("SURF", "DEEP", "NO_PLASTIC", "LAKE_WATER_PA", "LAKE_WATER_FL")
+  )
+
+
+```
+
+# Surface-Deep Project
+
+Timepoint
+Surface or Deep
+Plastic class (eg, yellow vs film PE)
+Plastic vs water
+
+## Beta-Diversity
+### Sample Type and Depth
+
+```{r sd_pcoa_samp_type_depth}
+
+# Ordinate
+sd_phylo.ord <- ordinate(
+  physeq = sd_phylo, 
+  method = "PCoA", 
+  distance = "bray"
+)
+
+# Plot 
+plot_ordination(
+  physeq = sd_phylo,
+  ordination = sd_phylo.ord,
+  color = "Sample_Type",
+  shape = "Depth_class",
+  title = "PCoA of Surface-Deep Project Communities from MiW 2021"
+) + 
+  scale_color_manual(values = samp_type_col) +
+geom_point(aes(color = Sample_Type), alpha = 0.7, size = 3) +
+  geom_point(colour = "grey90", size = 1.5) 
+
+```
+
+### Plastic Type
+
+```{r sd_pcoa_plastic_type_depth}
+
+
+# Plot 
+plot_ordination(
+  physeq = sd_phylo,
+  ordination = sd_phylo.ord,
+  color = "Plast_class",
+  shape = "Depth_class",
+  title = "PCoA of Surface-Deep Project Communities from MiW 2021"
+) + 
+  scale_color_manual(values = plast_col) +
+geom_point(aes(color = Plast_class), alpha = 0.7, size = 3) +
+  geom_point(colour = "grey90", size = 1.5) 
+
+```
+
+### Permanova
+Here is an example of how to run a permanova test using the adonis function in vegan. In this example we are testing the hypothesis that clusters of samples in the plot above that represent the microbes on the plastic film (FILM), yellow (YL) plastic fragments, the jar water, (NO_PLASTIC) and the T0 lake water (both particle-associated and free-living) have different centroids.
+
+```{r sd_permanova_conc}
+set.seed(1)
+
+# Calculate bray curtis distance matrix
+sd_phylo_bray <- phyloseq::distance(sd_phylo, method = "bray")
+
+# make a data frame from the sample_data
+sd_phylo_bray.df <- data.frame(sample_data(sd_phylo))
+
+# Adonis test
+adonis(sd_phylo_bray ~ Plast_class*Depth_class, data = sd_phylo_bray.df)
+
+# Homogeneity of dispersion test
+beta_conc <- betadisper(sd_phylo_bray, sd_phylo_bray.df$Conc_class)
+permutest(beta_conc)
+
+```
+
+## Alpha Diversity
+
+```{r bb_phylo_noPA_adiv}
+
+
+p=plot_richness(sd_phylo,x='Depth_class',color='Sample_Type') +
+  scale_color_manual(values = samp_type_col) 
+
+p + geom_boxplot(data = p$data, aes(x = Depth_class, y = value, color = Sample_Type), alpha = 0.1) +
+  scale_color_manual(values = samp_type_col) 
+
+
+```
+
+```{r filmVSYellowPieceAnalysisUno}
+
+
+
+p=plot_richness(sd_phylo,x='Depth_class',color='Plast_class') +
+  scale_color_manual(values = plast_col) 
+
+p + geom_boxplot(data = p$data, aes(x = Depth_class, y = value, color = Plast_class), alpha = 0.1) +
+  scale_color_manual(values = plast_col) 
+
+```
+
+```{r class_separation}
+sd_phylo_class <- sd_phylo_mod %>%
+  tax_glom(taxrank = "Class") %>%                     # agglomerate at phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.1) %>% # Filter out low abundance taxa
+  filter((Phylum != "Bacteria_unclassified(100)") & (Phylum != "unknown_unclassified(100)") & (Phylum == "Proteobacteria(100)")) %>%
+  arrange(Class)                                      # Sort data frame alphabetically by phylum
+
+```
+
+```{r class_plot}
+
+
+
+sd_phylo_meanClasses <- sd_phylo_class %>%
+  group_by(Class, Depth_class, Plast_class) %>%
+  summarise_at(vars(Abundance), list(mean_abundance = mean))
+
+
+ggplot(sd_phylo_meanClasses, aes(x = Plast_class, y = mean_abundance,fill = Class)) + 
+  geom_bar(stat = "identity", position = "dodge2") +
+  #scale_fill_manual(values = phylum_colors) +
+  scale_x_discrete(name=NULL,
+    breaks = c("YL", "FILM"),
+    labels = c("Yellow Piece","Film"), 
+    drop = FALSE
+  ) +
+  facet_grid(.~Depth_class)+
+  # Remove x axis title
+  theme(axis.title.x = element_blank()) + 
+  #
+  guides(fill = guide_legend(reverse = TRUE, keywidth = 1, keyheight = 1)) +
+  ylab("Relative Abundance (Class > 10%) \n") +
+  ggtitle("Proteobacteria Abundance by Plastic Type and Depth") 
+  
+```
+```{r order_separation}
+sd_phylo_order <- sd_phylo_mod %>%
+  tax_glom(taxrank = "Order") %>%                     # agglomerate at phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.001) %>% # Filter out low abundance taxa
+  filter((Phylum != "Bacteria_unclassified(100)") & (Phylum != "unknown_unclassified(100)")) %>%
+  arrange(Order)                                      # Sort data frame alphabetically by phylum
+
+```
+
+```{r order_plot}
+
+
+
+sd_phylo_meanOrders <- sd_phylo_order %>%
+  group_by(Order, Depth_class, Plast_class) %>%
+  summarise_at(vars(Abundance), list(mean_abundance = mean))
+
+
+ggplot(sd_phylo_meanClasses, aes(x = Plast_class, y = mean_abundance,fill = Order)) + 
+  geom_bar(stat = "identity", position = "dodge2") +
+  #scale_fill_manual(values = phylum_colors) +
+  scale_x_discrete(name=NULL,
+    breaks = c("YL", "FILM"),
+    labels = c("Yellow Piece","Film"), 
+    drop = FALSE
+  ) +
+  facet_grid(.~Depth_class)+
+  # Remove x axis title
+  theme(axis.title.x = element_blank()) + 
+  #
+  guides(fill = guide_legend(reverse = TRUE, keywidth = 1, keyheight = 1)) +
+  ylab("Relative Abundance (Order > 5%) \n") +
+  ggtitle("Proteobacteria Abundance by Plastic Type and Depth") 
+  
+```
